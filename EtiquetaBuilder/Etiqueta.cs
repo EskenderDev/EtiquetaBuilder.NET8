@@ -1,6 +1,9 @@
 ﻿using SkiaSharp;
-using ZXing;
-using ZXing.Common;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Etiqueta
 {
@@ -19,21 +22,22 @@ namespace Etiqueta
     public class LambdaCondicion<T> : ICondicion<T>
     {
         private readonly Func<T, bool> _condicion;
-
         public LambdaCondicion(Func<T, bool> condicion) => _condicion = condicion;
-
         public bool Evaluar(T contexto) => _condicion(contexto);
     }
 
+    // Clase base para elementos de la etiqueta
     public abstract class ElementoEtiqueta
     {
         public float X { get; set; }
         public float Y { get; set; }
+        public float Rotacion { get; set; } // Nueva propiedad para rotación
 
-        protected ElementoEtiqueta(float x, float y)
+        protected ElementoEtiqueta(float x, float y, float rotacion = 0)
         {
             X = x;
             Y = y;
+            Rotacion = rotacion;
         }
 
         public abstract void Dibujar(SKCanvas canvas, object contexto);
@@ -47,22 +51,25 @@ namespace Etiqueta
         public string Texto { get; set; }
         public SKPaint Paint { get; set; }
         public SKFont Font { get; set; }
+        public string FontFamilyName => Font.Typeface.FamilyName; // Exponer la fuente
 
-        public ElementoTexto(string texto, float x, float y, SKTypeface typeface, float textSize, SKColor color)
-            : base(x, y)
+        private float? _cachedAncho;
+        private float? _cachedAltura;
+
+        public ElementoTexto(string texto, float x, float y, SKTypeface typeface, float textSize, SKColor color, float rotacion = 0)
+            : base(x, y, rotacion)
         {
             Texto = texto ?? string.Empty;
             Font = new SKFont(typeface ?? SKTypeface.FromFamilyName("Arial"), textSize);
-            Paint = new SKPaint
-            {
-                Color = color,
-                IsAntialias = true
-            };
+            Paint = new SKPaint { Color = color, IsAntialias = true };
         }
 
         public override void Dibujar(SKCanvas canvas, object contexto)
         {
-            canvas.DrawText(Texto, X, Y + Font.Size, SKTextAlign.Left, Font, Paint); // Ajuste Y para alinear correctamente
+            canvas.Save();
+            canvas.RotateDegrees(Rotacion, X, Y);
+            canvas.DrawText(Texto, X, Y + Font.Size, SKTextAlign.Left, Font, Paint);
+            canvas.Restore();
         }
 
         public override void Escalar(float factor)
@@ -70,45 +77,48 @@ namespace Etiqueta
             X *= factor;
             Y *= factor;
             Font.Size *= factor;
+            _cachedAncho = null; // Invalida el caché
+            _cachedAltura = null;
         }
 
-        public override float ObtenerAltura() => Font.Size;
+        public override float ObtenerAltura()
+        {
+            if (_cachedAltura == null)
+            {
+                _cachedAltura = Font.Size;
+            }
+            return _cachedAltura.Value;
+        }
 
         public override float ObtenerAncho(SKCanvas canvas)
         {
-            using var paint = new SKPaint();
-            paint.Typeface = Font.Typeface;
-            return paint.MeasureText(Texto);
+            if (_cachedAncho == null)
+            {
+                // Usamos el servicio de medición centralizado
+                _cachedAncho = SKUtil.MedirTexto(Texto, Font.Typeface, Font.Size);
+            }
+            return _cachedAncho.Value;
         }
     }
 
-    // ... (resto del código)
-
-    public class ElementoCodigoBarras : ElementoEtiqueta
+    public class ElementoImagen : ElementoEtiqueta
     {
-        public string Codigo { get; set; }
+        public SKBitmap Imagen { get; set; }
         public SKRect Rectangulo { get; set; }
 
-        public ElementoCodigoBarras(string codigo, float x, float y, int ancho, int alto)
-            : base(x, y)
+        public ElementoImagen(SKBitmap imagen, float x, float y, float ancho, float alto, float rotacion = 0)
+            : base(x, y, rotacion)
         {
-            Codigo = codigo ?? string.Empty;
+            Imagen = imagen ?? throw new ArgumentNullException(nameof(imagen));
             Rectangulo = SKRect.Create(x, y, ancho, alto);
         }
 
         public override void Dibujar(SKCanvas canvas, object contexto)
         {
-            var writer = new BarcodeWriter<SKBitmap>
-            {
-                Format = BarcodeFormat.CODE_128,
-                Options = new EncodingOptions
-                {
-                    Width = (int)Rectangulo.Width,
-                    Height = (int)Rectangulo.Height
-                }
-            };
-            using var bitmap = writer.Write(Codigo);
-            canvas.DrawBitmap(bitmap, Rectangulo);
+            canvas.Save();
+            canvas.RotateDegrees(Rotacion, X, Y);
+            canvas.DrawBitmap(Imagen, Rectangulo);
+            canvas.Restore();
         }
 
         public override void Escalar(float factor)
@@ -123,7 +133,51 @@ namespace Etiqueta
         }
 
         public override float ObtenerAltura() => Rectangulo.Height;
+        public override float ObtenerAncho(SKCanvas canvas) => Rectangulo.Width;
+    }
 
+    public class ElementoCodigoBarras : ElementoEtiqueta
+    {
+        public string Codigo { get; set; }
+        public SKRect Rectangulo { get; set; }
+
+        public ElementoCodigoBarras(string codigo, float x, float y, int ancho, int alto, float rotacion = 0)
+            : base(x, y, rotacion)
+        {
+            Codigo = codigo ?? string.Empty;
+            Rectangulo = SKRect.Create(x, y, ancho, alto);
+        }
+
+        public override void Dibujar(SKCanvas canvas, object contexto)
+        {
+            var writer = new ZXing.BarcodeWriter<SKBitmap>
+            {
+                Format = ZXing.BarcodeFormat.CODE_128,
+                Options = new ZXing.Common.EncodingOptions
+                {
+                    Width = (int)Rectangulo.Width,
+                    Height = (int)Rectangulo.Height
+                }
+            };
+            using var bitmap = writer.Write(Codigo);
+            canvas.Save();
+            canvas.RotateDegrees(Rotacion, X, Y);
+            canvas.DrawBitmap(bitmap, Rectangulo);
+            canvas.Restore();
+        }
+
+        public override void Escalar(float factor)
+        {
+            X *= factor;
+            Y *= factor;
+            Rectangulo = SKRect.Create(
+                Rectangulo.Left * factor,
+                Rectangulo.Top * factor,
+                Rectangulo.Width * factor,
+                Rectangulo.Height * factor);
+        }
+
+        public override float ObtenerAltura() => Rectangulo.Height;
         public override float ObtenerAncho(SKCanvas canvas) => Rectangulo.Width;
     }
 
@@ -155,26 +209,35 @@ namespace Etiqueta
         }
 
         public override float ObtenerAltura() => Elemento.ObtenerAltura();
-
         public override float ObtenerAncho(SKCanvas canvas) => Elemento.ObtenerAncho(canvas);
     }
 
+    // La clase principal que representa la etiqueta
     public class Etiqueta
     {
-        internal readonly List<ElementoEtiqueta> _elementos = [];
+        private readonly List<ElementoEtiqueta> _elementos = new List<ElementoEtiqueta>();
+        public IReadOnlyList<ElementoEtiqueta> Elementos => _elementos.AsReadOnly();
+
         public float Ancho { get; private set; }
         public float Alto { get; private set; }
 
         public Etiqueta(float ancho, float alto)
         {
+            if (ancho <= 0 || alto <= 0)
+                throw new ArgumentException("Las dimensiones de la etiqueta deben ser mayores que 0.");
             Ancho = ancho;
             Alto = alto;
         }
 
-        public void AgregarElemento(ElementoEtiqueta elemento) => _elementos.Add(elemento);
+        public void AgregarElemento(ElementoEtiqueta elemento)
+        {
+            _elementos.Add(elemento);
+        }
 
         public void Escalar(float factor)
         {
+            if (factor <= 0)
+                throw new ArgumentException("El factor de escala debe ser mayor que 0.");
             Ancho *= factor;
             Alto *= factor;
             foreach (var elemento in _elementos)
@@ -196,14 +259,56 @@ namespace Etiqueta
 
             renderAction(bitmap);
         }
+
+        // Serialización a JSON
+        public string ToJson()
+        {
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Converters = { new JsonStringEnumConverter() }
+            };
+            return JsonSerializer.Serialize(this, options);
+        }
+
+        // Deserialización desde JSON
+        public static Etiqueta FromJson(string json)
+        {
+            var options = new JsonSerializerOptions
+            {
+                Converters = { new JsonStringEnumConverter() }
+            };
+            return JsonSerializer.Deserialize<Etiqueta>(json, options);
+        }
     }
 
-    public class EtiquetaBuilder(float ancho, float alto)
+    // Clase de utilidad para centralizar la medición de texto y evitar instanciar SKPaint cada vez
+    // Clase de utilidad actualizada para medir texto usando SKFont.MeasureText
+    public static class SKUtil
     {
-        private readonly Etiqueta _etiqueta = new Etiqueta(ancho, alto);
+        public static float MedirTexto(string texto, SKTypeface typeface, float textSize)
+        {
+            if (texto == null)
+                throw new ArgumentNullException(nameof(texto));
+            // Se crea un SKFont con la tipografía y tamaño indicados
+            using var font = new SKFont(typeface, textSize);
+            // Se mide el ancho del texto utilizando SKFont.MeasureText()
+            return font.MeasureText(texto);
+        }
+    }
+
+
+    // Builder para construir la etiqueta de forma fluida
+    public class EtiquetaBuilder
+    {
+        private readonly Etiqueta _etiqueta;
         private object? _contexto;
         private float _ultimaY = 0;
-        private bool _condicionEjecutada = false;
+
+        public EtiquetaBuilder(float ancho, float alto)
+        {
+            _etiqueta = new Etiqueta(ancho, alto);
+        }
 
         public EtiquetaBuilder ConContexto<T>(T contexto) where T : class
         {
@@ -211,50 +316,60 @@ namespace Etiqueta
             return this;
         }
 
-        public EtiquetaBuilder AgregarTexto(string texto, float x, float y, SKTypeface typeface, float textSize, SKColor color, AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda)
+        // Validación de parámetros y límites incluidos
+        public EtiquetaBuilder AgregarTexto(string texto, float x, float y, SKTypeface typeface, float textSize, SKColor color,
+            AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda, float rotacion = 0)
         {
-            var elemento = new ElementoTexto(texto, x, y, typeface, textSize, color);
+            ValidarParametros(x, y, textSize);
+            var elemento = new ElementoTexto(texto, x, y, typeface, textSize, color, rotacion);
             AlinearElemento(elemento, alineacion);
+            ValidarLimites(elemento);
             _etiqueta.AgregarElemento(elemento);
             _ultimaY = Math.Max(_ultimaY, y + elemento.ObtenerAltura());
             return this;
         }
 
-        public EtiquetaBuilder AgregarCodigoBarras(string codigo, float x, float y, int ancho, int alto, AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda)
+        public EtiquetaBuilder AgregarCodigoBarras(string codigo, float x, float y, int ancho, int alto,
+            AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda, float rotacion = 0)
         {
-            var elemento = new ElementoCodigoBarras(codigo, x, y, ancho, alto);
+            ValidarParametros(x, y, ancho, alto);
+            var elemento = new ElementoCodigoBarras(codigo, x, y, ancho, alto, rotacion);
             AlinearElemento(elemento, alineacion);
+            ValidarLimites(elemento);
             _etiqueta.AgregarElemento(elemento);
             _ultimaY = Math.Max(_ultimaY, y + elemento.ObtenerAltura());
             return this;
         }
 
-        public EtiquetaBuilder AgregarTextoDividido(string texto, float x, float y, SKTypeface typeface, float textSize, int longitudMaxima, float espaciadoVertical, SKColor color, AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda)
+        public EtiquetaBuilder AgregarImagen(SKBitmap imagen, float x, float y, float ancho, float alto,
+            AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda, float rotacion = 0)
         {
+            if (imagen == null)
+                throw new ArgumentNullException(nameof(imagen));
+            ValidarParametros(x, y, ancho, alto);
+            var elemento = new ElementoImagen(imagen, x, y, ancho, alto, rotacion);
+            AlinearElemento(elemento, alineacion);
+            ValidarLimites(elemento);
+            _etiqueta.AgregarElemento(elemento);
+            _ultimaY = Math.Max(_ultimaY, y + elemento.ObtenerAltura());
+            return this;
+        }
+
+        public EtiquetaBuilder AgregarTextoDividido(string texto, float x, float y, SKTypeface typeface, float textSize,
+            int longitudMaxima, float espaciadoVertical, SKColor color, AlineacionHorizontal alineacion = AlineacionHorizontal.Izquierda, float rotacion = 0)
+        {
+            if (longitudMaxima <= 0)
+                throw new ArgumentException("La longitud máxima debe ser mayor que 0.");
             texto ??= string.Empty;
-            ArgumentNullException.ThrowIfNull(typeface);
-
             var lineas = DividirTexto(texto, longitudMaxima);
             foreach (var (linea, i) in lineas.Select((l, idx) => (l, idx)))
             {
                 float yPos = y + (i * espaciadoVertical);
-                if (yPos < 0) yPos = 0;
-
-                var elemento = new ElementoTexto(linea, x, yPos, typeface, textSize, color);
+                var elemento = new ElementoTexto(linea, x, yPos, typeface, textSize, color, rotacion);
                 AlinearElemento(elemento, alineacion);
-
-                using var bitmap = new SKBitmap(1, 1);
-                using var canvas = new SKCanvas(bitmap);
-                float anchoElemento = elemento.ObtenerAncho(canvas);
-                if (elemento.X < 0) elemento.X = 0;
-                if (elemento.X + anchoElemento > _etiqueta.Ancho) elemento.X = _etiqueta.Ancho - anchoElemento;
-
+                ValidarLimites(elemento);
                 _etiqueta.AgregarElemento(elemento);
                 _ultimaY = Math.Max(_ultimaY, elemento.Y + elemento.ObtenerAltura());
-
-#if DEBUG
-                Console.WriteLine($"Texto: '{linea}', X: {elemento.X}, Y: {elemento.Y}, Altura: {elemento.ObtenerAltura()}");
-#endif
             }
             return this;
         }
@@ -267,7 +382,6 @@ namespace Etiqueta
                 lineas.Add(string.Empty);
                 return lineas;
             }
-
             while (texto.Length > longitudMaxima)
             {
                 lineas.Add(texto[..longitudMaxima]);
@@ -280,8 +394,10 @@ namespace Etiqueta
             return lineas;
         }
 
+        // Centralizamos la alineación usando la medición centralizada
         private void AlinearElemento(ElementoEtiqueta elemento, AlineacionHorizontal alineacion)
         {
+            // Se reutiliza un canvas mínimo para obtener la medida
             using var bitmap = new SKBitmap(1, 1);
             using var canvas = new SKCanvas(bitmap);
             float anchoElemento = elemento.ObtenerAncho(canvas);
@@ -294,99 +410,37 @@ namespace Etiqueta
             };
         }
 
-        public EtiquetaBuilder If<T>(Func<T, bool> condicion, Action<EtiquetaBuilder> configuracion) where T : class
+        // Validación de límites para que los elementos no se salgan de la etiqueta
+        private void ValidarLimites(ElementoEtiqueta elemento)
         {
-            _condicionEjecutada = false;
-            if (_contexto is T ctx && !_condicionEjecutada && condicion(ctx))
-            {
-                configuracion(this);
-                _condicionEjecutada = true;
-            }
-            return this;
+            using var bitmap = new SKBitmap(1, 1);
+            using var canvas = new SKCanvas(bitmap);
+            float anchoElemento = elemento.ObtenerAncho(canvas);
+            float alturaElemento = elemento.ObtenerAltura();
+
+            if (elemento.X < 0) elemento.X = 0;
+            if (elemento.Y < 0) elemento.Y = 0;
+            if (elemento.X + anchoElemento > _etiqueta.Ancho) elemento.X = _etiqueta.Ancho - anchoElemento;
+            if (elemento.Y + alturaElemento > _etiqueta.Alto) elemento.Y = _etiqueta.Alto - alturaElemento;
         }
 
-        public EtiquetaBuilder ElseIf<T>(Func<T, bool> condicion, Action<EtiquetaBuilder> configuracion) where T : class
+        // Validación básica de parámetros numéricos
+        private void ValidarParametros(params float[] valores)
         {
-            if (_contexto is T ctx && !_condicionEjecutada && condicion(ctx))
-            {
-                configuracion(this);
-                _condicionEjecutada = true;
-            }
-            return this;
-        }
-
-        public EtiquetaBuilder Else(Action<EtiquetaBuilder> configuracion)
-        {
-            if (!_condicionEjecutada)
-            {
-                configuracion(this);
-                _condicionEjecutada = true;
-            }
-            return this;
-        }
-
-        public EtiquetaBuilder For(int inicio, int fin, Action<EtiquetaBuilder, int> configuracion)
-        {
-            for (int i = inicio; i < fin; i++)
-            {
-                configuracion(this, i);
-            }
-            return this;
-        }
-
-        public EtiquetaBuilder ForEach<T>(IEnumerable<T> items, Action<EtiquetaBuilder, T> configuracion)
-        {
-            ArgumentNullException.ThrowIfNull(items);
-            foreach (var item in items)
-            {
-                configuracion(this, item);
-            }
-            return this;
-        }
-
-        public EtiquetaBuilder Escalar(float factor)
-        {
-            if (factor <= 0) throw new ArgumentException("El factor de escala debe ser mayor que 0.");
-            _etiqueta.Escalar(factor);
-            _ultimaY *= factor;
-            return this;
-        }
-
-        public EtiquetaBuilder EscalarDinamicamente(float anchoObjetivo, float altoObjetivo)
-        {
-            if (anchoObjetivo <= 0 || altoObjetivo <= 0)
-                throw new ArgumentException("Las dimensiones objetivo deben ser mayores que 0.");
-
-            float factor = Math.Min(anchoObjetivo / _etiqueta.Ancho, altoObjetivo / _etiqueta.Alto);
-            _etiqueta.Escalar(factor);
-            _ultimaY *= factor;
-            return this;
-        }
-
-        public float ObtenerUltimaY() => _ultimaY;
-
-        public EtiquetaBuilder CentrarVerticalmente()
-        {
-            if (_etiqueta._elementos.Count == 0) return this;
-
-            float alturaTotal = _ultimaY;
-            float desplazamiento = (_etiqueta.Alto - alturaTotal) / 2f;
-
-            foreach (var elemento in _etiqueta._elementos)
-            {
-                elemento.Y += desplazamiento;
-            }
-            _ultimaY += desplazamiento;
-            return this;
+            if (valores.Any(v => v < 0))
+                throw new ArgumentException("Los valores de posición y dimensiones deben ser mayores o iguales a 0.");
         }
 
         public Etiqueta Construir() => _etiqueta;
 
+        // Genera la etiqueta, invocando el renderAction con el SKBitmap resultante
         public EtiquetaBuilder Generar(Action<SKBitmap> renderAction)
         {
             _etiqueta.Generar(renderAction, _contexto);
-            _condicionEjecutada = false;
             return this;
         }
     }
+
+    // Nota: Para extender la librería, basta con crear nuevas clases que hereden de ElementoEtiqueta,
+    // por ejemplo, ElementoForma, ElementoLinea, etc. y luego agregar métodos en el builder para gestionarlos.
 }
